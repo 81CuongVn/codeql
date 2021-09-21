@@ -16,7 +16,7 @@ enum TrapCompression {
 
 impl TrapCompression {
     fn from_env() -> TrapCompression {
-        match std::env::var("CODEQL_RUBY_TRAP_COMPRESSION") {
+        match std::env::var("CODEQL_EXTRACTOR_RUBY_TRAP_COMPRESSION") {
             Ok(method) => match TrapCompression::from_string(&method) {
                 Some(c) => c,
                 None => {
