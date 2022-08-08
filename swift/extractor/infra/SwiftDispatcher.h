@@ -3,6 +3,7 @@
 #include <swift/AST/SourceFile.h>
 #include <swift/Basic/SourceManager.h>
 #include <llvm/Support/FileSystem.h>
+#include <swift/AST/ASTMangler.h>
 #include <swift/Parse/Token.h>
 
 #include "swift/extractor/trap/TrapLabelStore.h"
@@ -12,6 +13,54 @@
 #include "swift/extractor/infra/FilePath.h"
 
 namespace codeql {
+
+static bool namedDecl(const swift::Decl& decl) {
+  if (llvm::isa<swift::FuncDecl, swift::ConstructorDecl, swift::DestructorDecl, swift::ParamDecl,
+                swift::StructDecl, swift::ClassDecl, swift::EnumDecl, swift::ProtocolDecl,
+                swift::EnumElementDecl, swift::AssociatedTypeDecl, swift::TypeAliasDecl,
+                swift::AccessorDecl, swift::SubscriptDecl, swift::ModuleDecl>(decl)) {
+    return true;
+  }
+  if (llvm::isa<swift::VarDecl>(decl)) {
+    if (decl.getDeclContext()->isLocalContext() || decl.getModuleContext()->isNonSwiftModule()) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+static std::string mangledName(const swift::ValueDecl& decl) {
+  assert(namedDecl(decl) && "Should only mangle named decls");
+  swift::Mangle::ASTMangler mangler;
+  // ASTMangler::mangleAnyDecl crashes when called on `ModuleDecl`
+  // TODO find a more unique string working also when different modules are compiled with the same
+  // name
+  std::ostringstream ret;
+  if (decl.getKind() == swift::DeclKind::Module) {
+    ret << static_cast<const swift::ModuleDecl&>(decl).getRealName().str().str();
+  } else if (decl.getKind() == swift::DeclKind::TypeAlias) {
+    // In cases like this (when coming from PCM)
+    //  typealias CFXMLTree = CFTree
+    //  typealias CFXMLTreeRef = CFXMLTree
+    // mangleAnyDecl mangles both CFXMLTree and CFXMLTreeRef into 'So12CFXMLTreeRefa'
+    // which is not correct and causes inconsistencies. mangleEntity makes these two distinct
+    // prefix adds a couple of special symbols, we don't necessary need them
+    ret << mangler.mangleEntity(&decl);
+  } else {
+    // prefix adds a couple of special symbols, we don't necessary need them
+    ret << mangler.mangleAnyDecl(&decl, /* prefix = */ false);
+  }
+  // there can be separate declarations (`VarDecl` or `AccessorDecl`) which are effectively the same
+  // (with equal mangled name) but come from different clang modules. This is the case for example
+  // for glibc constants like `L_SET` that appear in both `SwiftGlibc` and `CDispatch`.
+  // For the moment, we sidestep the problem by making them separate entities in the DB
+  // TODO find a more solid solution
+  if (decl.getModuleContext()->isNonSwiftModule()) {
+    ret << '_' << decl.getModuleContext()->getRealName().str().str();
+  }
+  return ret.str();
+}
 
 // The main responsibilities of the SwiftDispatcher are as follows:
 // * redirect specific AST node emission to a corresponding visitor (statements, expressions, etc.)
@@ -42,13 +91,17 @@ class SwiftDispatcher {
   // all references and pointers passed as parameters to this constructor are supposed to outlive
   // the SwiftDispatcher
   SwiftDispatcher(const swift::SourceManager& sourceManager,
+                  std::vector<swift::Decl*>& pendingDecls,
                   TrapDomain& trap,
-                  swift::ModuleDecl& currentModule,
-                  swift::SourceFile* currentPrimarySourceFile = nullptr)
+                  //                  swift::ModuleDecl& currentModule,
+                  swift::Decl* currentDecl,
+                  swift::SourceFile* currentPrimarySourceFile)
       : sourceManager{sourceManager},
         trap{trap},
-        currentModule{currentModule},
-        currentPrimarySourceFile{currentPrimarySourceFile} {
+        //        currentModule{currentModule},
+        //        currentPrimarySourceFile{currentPrimarySourceFile},
+        pendingDecls(pendingDecls),
+        currentDecl(currentDecl) {
     if (currentPrimarySourceFile) {
       // we make sure the file is in the trap output even if the source is empty
       fetchLabel(getFilePath(currentPrimarySourceFile->getFilename()));
@@ -229,18 +282,23 @@ class SwiftDispatcher {
   //    same module one by one. In this mode, we restrict emission only to the same file ignoring
   //    all the other files.
   bool shouldEmitDeclBody(const swift::Decl& decl) {
-    if (decl.getModuleContext() != &currentModule) {
-      return false;
-    }
-    // ModuleDecl is a special case: if it passed the previous test, it is the current module
-    // but it never has a source file, so we short circuit to emit it in any case
-    if (!currentPrimarySourceFile || decl.getKind() == swift::DeclKind::Module) {
+    if (!namedDecl(decl) || currentDecl == &decl) {
       return true;
     }
-    if (auto context = decl.getDeclContext()) {
-      return currentPrimarySourceFile == context->getParentSourceFile();
-    }
+    pendingDecls.push_back(const_cast<swift::Decl*>(&decl));
     return false;
+    //    if (decl.getModuleContext() != &currentModule) {
+    //      return false;
+    //    }
+    //    // ModuleDecl is a special case: if it passed the previous test, it is the current module
+    //    // but it never has a source file, so we short circuit to emit it in any case
+    //    if (!currentPrimarySourceFile || decl.getKind() == swift::DeclKind::Module) {
+    //      return true;
+    //    }
+    //    if (auto context = decl.getDeclContext()) {
+    //      return currentPrimarySourceFile == context->getParentSourceFile();
+    //    }
+    //    return false;
   }
 
   void emitComment(swift::Token& comment) {
@@ -331,8 +389,10 @@ class SwiftDispatcher {
   TrapDomain& trap;
   Store store;
   Store::Handle waitingForNewLabel{std::monostate{}};
-  swift::ModuleDecl& currentModule;
-  swift::SourceFile* currentPrimarySourceFile;
+  //  swift::ModuleDecl& currentModule;
+  //  swift::SourceFile* currentPrimarySourceFile;
+  std::vector<swift::Decl*>& pendingDecls;
+  swift::Decl* currentDecl;
 };
 
 }  // namespace codeql

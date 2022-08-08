@@ -82,6 +82,7 @@ static llvm::SmallVector<swift::Decl*> getTopLevelDecls(swift::ModuleDecl& modul
 
 static void extractDeclarations(const SwiftExtractorConfiguration& config,
                                 swift::CompilerInstance& compiler,
+                                std::unordered_set<const swift::Decl*>& extractedDecls,
                                 swift::ModuleDecl& module,
                                 swift::SourceFile* primaryFile = nullptr) {
   auto filename = getFilename(module, primaryFile);
@@ -116,13 +117,47 @@ static void extractDeclarations(const SwiftExtractorConfiguration& config,
     }
   }
 
-  SwiftVisitor visitor(compiler.getSourceMgr(), trap, module, primaryFile);
-  auto topLevelDecls = getTopLevelDecls(module, primaryFile);
-  for (auto decl : topLevelDecls) {
-    visitor.extract(decl);
-  }
+  std::vector<swift::Decl*> pending;
+  SwiftVisitor globalVisitor(compiler.getSourceMgr(), pending, trap, nullptr, primaryFile);
   for (auto& comment : comments) {
-    visitor.extract(comment);
+    globalVisitor.extract(comment);
+  }
+
+  auto topLevelDecls = getTopLevelDecls(module, primaryFile);
+
+  std::queue<swift::Decl*> worklist;
+  for (auto decl : topLevelDecls) {
+    if (extractedDecls.count(decl)) {
+      continue;
+    }
+    worklist.push(decl);
+  }
+
+  while (!worklist.empty()) {
+    auto decl = worklist.front();
+    extractedDecls.insert(decl);
+    worklist.pop();
+    if (namedDecl(*decl)) {
+      auto declName = mangledName(llvm::cast<swift::ValueDecl>(*decl));
+      auto hashName = std::to_string(std::hash<std::string>{}(declName));
+      auto localTrapTarget = createTargetTrapFile(config, hashName);
+      if (!localTrapTarget) {
+        // declaration was already extracted
+        continue;
+      }
+      TrapDomain localTrap{*localTrapTarget};
+      SwiftVisitor visitor(compiler.getSourceMgr(), pending, localTrap, decl, primaryFile);
+      visitor.extract(decl);
+      for (auto pend : pending) {
+        if (extractedDecls.count(pend)) {
+          continue;
+        }
+        extractedDecls.insert(pend);
+        worklist.push(pend);
+      }
+    } else {
+      globalVisitor.extract(decl);
+    }
   }
 }
 
@@ -171,7 +206,7 @@ void codeql::extractSwiftFiles(const SwiftExtractorConfiguration& config,
                                swift::CompilerInstance& compiler) {
   auto inputFiles = collectInputFilenames(compiler);
   auto modules = collectModules(compiler);
-
+  std::unordered_set<const swift::Decl*> extractedDecls;
   for (auto& module : modules) {
     bool isFromSourceFile = false;
     for (auto file : module->getFiles()) {
@@ -184,10 +219,10 @@ void codeql::extractSwiftFiles(const SwiftExtractorConfiguration& config,
         continue;
       }
       archiveFile(config, *sourceFile);
-      extractDeclarations(config, compiler, *module, sourceFile);
+      extractDeclarations(config, compiler, extractedDecls, *module, sourceFile);
     }
     if (!isFromSourceFile) {
-      extractDeclarations(config, compiler, *module);
+      extractDeclarations(config, compiler, extractedDecls, *module);
     }
   }
 }

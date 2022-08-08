@@ -61,7 +61,7 @@ class DeclVisitor : public AstVisitorBase<DeclVisitor> {
   codeql::IfConfigClause translateIfConfigClause(const swift::IfConfigClause& clause);
 
  private:
-  std::string mangledName(const swift::ValueDecl& decl);
+  //  std::string mangledName(const swift::ValueDecl& decl);
   void fillAbstractFunctionDecl(const swift::AbstractFunctionDecl& decl,
                                 codeql::AbstractFunctionDecl& entry);
   void fillOperatorDecl(const swift::OperatorDecl& decl, codeql::OperatorDecl& entry);
@@ -84,8 +84,8 @@ class DeclVisitor : public AstVisitorBase<DeclVisitor> {
     return std::nullopt;
   }
 
- private:
-  swift::Mangle::ASTMangler mangler;
+  // private:
+  //  swift::Mangle::ASTMangler mangler;
 };
 
 }  // namespace codeql
