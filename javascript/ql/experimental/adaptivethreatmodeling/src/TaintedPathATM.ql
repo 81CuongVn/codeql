@@ -23,6 +23,7 @@ import experimental.adaptivethreatmodeling.TaintedPathATM
 
 from DataFlow::Configuration cfg, DataFlow::PathNode source, DataFlow::PathNode sink, float score
 where
+  score < -10 and
   cfg.hasFlowPath(source, sink) and
   not isFlowLikelyInBaseQuery(source.getNode(), sink.getNode()) and
   score = getScoreForFlow(source.getNode(), sink.getNode())
